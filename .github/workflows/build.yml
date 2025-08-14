@@ -1,0 +1,64 @@
+name: Build and Push RStudio Docker Image
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Install Nix
+        uses: cachix/install-nix-action@v22
+        with:
+          nix_path: nixpkgs=channel:nixos-24.11
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      
+      - name: Build Docker image with Nix
+        run: |
+          echo "Building Docker image..."
+          nix-build docker-image.nix
+          echo "Loading image into Docker..."
+          docker load < result
+          echo "Image loaded successfully"
+          docker images
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Tag and push image
+        run: |
+          # Tag with latest
+          docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest
+          
+          # Tag with date
+          docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:$(date +%Y%m%d)
+          
+          # Tag with RStudio version if we can get it
+          RSTUDIO_VERSION=$(docker run --rm rstudio-nix:latest ${pkgs.rstudio-server}/bin/rserver --version 2>/dev/null | head -n1 || echo "unknown")
+          if [ "$RSTUDIO_VERSION" != "unknown" ]; then
+            docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:$RSTUDIO_VERSION
+            docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:$RSTUDIO_VERSION
+          fi
+          
+          # Push all tags
+          docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest
+          docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:$(date +%Y%m%d)
+          
+          echo "✅ Image pushed successfully!"
+          echo "Pull with: docker pull ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest"
