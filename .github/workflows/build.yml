@@ -1,11 +1,16 @@
+# .github/workflows/build.yml
 name: Build and Push RStudio Docker Image
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+    - cron: '0 2 * * *'  # daily at 02:00 UTC
   push:
     branches: [ main ]
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+  workflow_dispatch:
+
+concurrency:
+  group: rstudio-nix-docker-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -13,52 +18,76 @@ jobs:
     permissions:
       contents: read
       packages: write
-      
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Nix
-        uses: cachix/install-nix-action@v22
+        uses: cachix/install-nix-action@v27
         with:
           nix_path: nixpkgs=channel:nixos-24.11
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      
-      - name: Build Docker image with Nix
-        run: |
-          echo "Building Docker image..."
-          nix-build docker-image.nix
-          echo "Loading image into Docker..."
-          docker load < result
-          echo "Image loaded successfully"
-          docker images
-      
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Tag and push image
+
+      - name: Determine latest RStudio version in nixpkgs
+        id: version
+        shell: bash
         run: |
-          # Tag with latest
-          docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest
-          
-          # Tag with date
-          docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:$(date +%Y%m%d)
-          
-          # Tag with RStudio version if we can get it
-          RSTUDIO_VERSION=$(docker run --rm rstudio-nix:latest ${pkgs.rstudio-server}/bin/rserver --version 2>/dev/null | head -n1 || echo "unknown")
-          if [ "$RSTUDIO_VERSION" != "unknown" ]; then
-            docker tag rstudio-nix:latest ghcr.io/${{ github.repository_owner }}/rstudio-nix:$RSTUDIO_VERSION
-            docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:$RSTUDIO_VERSION
+          set -euo pipefail
+          RSTUDIO_VERSION=$(nix-instantiate --eval -E '(import <nixpkgs> {}).rstudio-server.version' | tr -d '"')
+          echo "version=$RSTUDIO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "RStudio version from nixpkgs: $RSTUDIO_VERSION"
+
+      - name: Skip if this version already exists on GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          if docker manifest inspect ghcr.io/$OWNER_LC/rstudio-nix:${{ steps.version.outputs.version }} >/dev/null 2>&1; then
+            echo "Image tag already exists: ghcr.io/$OWNER_LC/rstudio-nix:${{ steps.version.outputs.version }}"
+            echo "Nothing to do. Exiting."
+            exit 0
           fi
-          
-          # Push all tags
-          docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest
-          docker push ghcr.io/${{ github.repository_owner }}/rstudio-nix:$(date +%Y%m%d)
-          
-          echo "✅ Image pushed successfully!"
-          echo "Pull with: docker pull ghcr.io/${{ github.repository_owner }}/rstudio-nix:latest"
+          echo "No existing image for version ${{ steps.version.outputs.version }}. Proceeding to build."
+
+      - name: Build Docker image tarball with Nix
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix-build docker-image.nix -o result
+          ls -lh result
+
+      - name: Load image into Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker load < result
+          docker images | grep -E '^rstudio-nix\s+latest'
+
+      - name: Tag and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          DATE_TAG=$(date -u +%Y%m%d)
+
+          # Sanity: read version we evaluated earlier (no Nix vars in shell)
+          RSTUDIO_VERSION='${{ steps.version.outputs.version }}'
+
+          # Tag for GHCR
+          docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:latest
+          docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
+          docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$RSTUDIO_VERSION
+
+          # Push
+          docker push ghcr.io/$OWNER_LC/rstudio-nix:latest
+          docker push ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
+          docker push ghcr.io/$OWNER_LC/rstudio-nix:$RSTUDIO_VERSION
+
+          echo "Pushed: latest, $DATE_TAG, $RSTUDIO_VERSION"
