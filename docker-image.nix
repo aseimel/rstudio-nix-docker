@@ -4,10 +4,10 @@
 let
   lib = pkgs.lib;
 
-  # Toolchain + dev libs needed to compile common R packages
+  # Toolchain + dev libs for building common R packages
   toolchain = [
-    pkgs.stdenv.cc            # cc/c++
-    pkgs.gfortran             # fortran
+    pkgs.stdenv.cc
+    pkgs.gfortran
     pkgs.gnumake
     pkgs.binutils
     pkgs.pkg-config
@@ -35,7 +35,7 @@ let
   pcShare = lib.makeSearchPath "share/pkgconfig" devLibs;
   ldLib = lib.makeLibraryPath devLibs;
 
-  # /etc files: passwd/group/shadow, PAM, rserver.conf, login.defs
+  # /etc files: passwd/group/shadow, PAM, rserver.conf, login.defs, R config
   etcLayer = pkgs.runCommand "rstudio-etc" {} ''
     set -eu
     mkdir -p $out/etc/pam.d $out/etc/rstudio $out/etc/R
@@ -55,7 +55,7 @@ EOF
 root:*:10933:0:99999:7:::
 EOF
 
-    # Allow low IDs common on Unraid (UID_MIN=99, GID_MIN=100)
+    # Allow low IDs on Unraid
     cat > $out/etc/login.defs <<'EOF'
 MAIL_DIR        /var/spool/mail
 PASS_MAX_DAYS   99999
@@ -76,13 +76,13 @@ account  required       ${pkgs.pam}/lib/security/pam_unix.so
 session  required       ${pkgs.pam}/lib/security/pam_unix.so
 EOF
 
-    # rserver: listen on all interfaces; use our rsession wrapper
+    # rserver: listen on all interfaces; use our wrapper
     cat > $out/etc/rstudio/rserver.conf <<'EOF'
 www-address=0.0.0.0
-rsession-path=/etc/rstudio/rsession-wrapper.sh
+rsession-path=/bin/rsession-wrapper.sh
 EOF
 
-    # System-wide R configuration mirrored from your VM (generalized for $HOME)
+    # System-wide R config
     cat > $out/etc/R/Rprofile.site <<'EOF'
 local({
   rlib <- file.path(Sys.getenv("HOME"), "R", "library")
@@ -94,7 +94,6 @@ local({
 })
 EOF
 
-    # Makevars: point compilers and pkg-config; other flags come via PKG_CONFIG_PATH
     cat > $out/etc/R/Makevars.site <<EOF
 CC=${pkgs.stdenv.cc.cc}/bin/cc
 CXX=${pkgs.stdenv.cc.cc}/bin/c++
@@ -105,20 +104,20 @@ PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config
 EOF
   '';
 
-  # rsession wrapper: export env and exec the real rsession
-  rsessionWrapper = pkgs.writeShellScript "rsession-wrapper.sh" ''
+  # rsession wrapper: escape Bash ${...} so Nix doesn't interpolate
+  rsessionWrapper = pkgs.writeShellScriptBin "rsession-wrapper.sh" ''
     #!/bin/bash
     set -euo pipefail
 
     # Ensure the user library and Makevars are respected
-    export R_LIBS_USER="${R_LIBS_USER:-$HOME/R/library}"
+    export R_LIBS_USER="''${R_LIBS_USER:-$HOME/R/library}"
     export R_MAKEVARS_SITE="/etc/R/Makevars.site"
 
     # Toolchain + pkg-config path for compilation
     export PATH="${lib.makeBinPath toolchain}:$PATH"
     export PKG_CONFIG_PATH="${pcLib}:${pcShare}"
-    export LD_LIBRARY_PATH="${ldLib}:${LD_LIBRARY_PATH:-}"
-    export LIBRARY_PATH="${ldLib}:${LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="${ldLib}:''${LD_LIBRARY_PATH:-}"
+    export LIBRARY_PATH="${ldLib}:''${LIBRARY_PATH:-}"
 
     exec ${pkgs.rstudio-server}/bin/rsession "$@"
   '';
@@ -133,18 +132,14 @@ EOF
     UMASKV="''${UMASK:-}"
     PORT="''${WWW_PORT:-8787}"
 
-    # Base dirs
     mkdir -p /etc/R /etc/rstudio /var/lib/rstudio-server /var/run/rstudio-server
 
-    # Group (create if missing)
-    if ! getent group "''${GIDV}" >/dev/null 2>&1; then
+    # Group via /etc/group (no getent dependency)
+    if ! grep -qE "^([^:]*:){2}''${GIDV}:" /etc/group; then
       groupadd -g "''${GIDV}" "''${USERNAME}"
-      GROUPNAME="''${USERNAME}"
-    else
-      GROUPNAME="$(getent group "''${GIDV}" | cut -d: -f1)"
     fi
 
-    # User (create/update; avoid -m so we don't complain if /home is bind-mounted)
+    # User (avoid -m; home may be bind-mounted)
     if id -u "''${USERNAME}" >/dev/null 2>&1; then
       CUR_UID="$(id -u "''${USERNAME}")"
       CUR_GID="$(id -g "''${USERNAME}")"
@@ -155,18 +150,16 @@ EOF
       useradd -M -d "/home/''${USERNAME}" -u "''${UIDV}" -g "''${GIDV}" -s /bin/bash "''${USERNAME}"
     fi
 
-    # Home & subdirs
     HOME_DIR="/home/''${USERNAME}"
     mkdir -p "''${HOME_DIR}" "''${HOME_DIR}/projects" "''${HOME_DIR}/data" "''${HOME_DIR}/R/library"
     chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}"
 
-    # R env files
     REN="''${HOME_DIR}/.Renviron"
     touch "''${REN}"
     grep -q '^R_LIBS_USER=' "''${REN}" || printf 'R_LIBS_USER=%s\n' "''${HOME_DIR}/R/library" >> "''${REN}"
     chown "''${UIDV}:''${GIDV}" "''${REN}"
 
-    # Password handling (prefer hash; else hash plaintext internally)
+    # Password handling
     set_password_hash()  { echo "''${USERNAME}:''${1}" | chpasswd -e; }
     set_password_plain() { echo "''${USERNAME}:''${1}" | chpasswd; }
 
@@ -175,7 +168,7 @@ EOF
     elif [ -n "''${PASSWORD_FILE:-}" ] && [ -s "''${PASSWORD_FILE}" ]; then
       PW="$(cat "''${PASSWORD_FILE}")"
       case "''${PW}" in
-        \$*) set_password_hash "''${PW}" ;;  # crypt hash
+        \$*) set_password_hash "''${PW}" ;;
         *)   set_password_plain "''${PW}" ;;
       esac
     else
@@ -183,7 +176,6 @@ EOF
       if [ -z "''${PASSWORD:-}" ]; then
         echo "WARNING: PASSWORD not provided; defaulting to 'changeme' for user ''${USERNAME}" >&2
       fi
-      # Hash plaintext internally to avoid ENCRYPT_METHOD quirks
       if command -v openssl >/dev/null 2>&1; then
         HASH="$(openssl passwd -6 "''${PW}")"
         set_password_hash "''${HASH}"
@@ -192,22 +184,17 @@ EOF
       fi
     fi
 
-    # Optional ownership of mounts (off by default)
     bool_true() { [ "''${1:-false}" = "true" ] || [ "''${1:-0}" = "1" ]; }
     if bool_true "''${CHOWN_PROJECTS:-false}"; then chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}/projects" || true; fi
     if bool_true "''${CHOWN_DATA:-false}";     then chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}/data" || true; fi
     if bool_true "''${CHOWN_RLIBS:-false}";    then chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}/R/library" || true; fi
 
-    # umask if set
     if [ -n "''${UMASKV}" ]; then umask "''${UMASKV}" || true; fi
-
-    # Ensure rserver picks up our wrapper and listens on all interfaces
-    install -m 0755 /etc/rstudio/rsession-wrapper.sh /etc/rstudio/rsession-wrapper.sh || true
 
     exec rserver --server-daemonize=0 --www-port="''${PORT}"
   '';
 
-  # Root filesystem: RStudio, R, toolchain, dev libs, openssl (for hashing)
+  # Root filesystem
   rootfs = pkgs.buildEnv {
     name = "rstudio-rootfs";
     paths = [
