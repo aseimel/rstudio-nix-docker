@@ -54,7 +54,7 @@ EOF
 root:*:10933:0:99999:7:::
 EOF
 
-    # Allow Unraid-style IDs
+    # Allow all IDs
     cat > $out/etc/login.defs <<'EOF'
 MAIL_DIR        /var/spool/mail
 PASS_MAX_DAYS   99999
@@ -181,17 +181,14 @@ EOF
     fi
 
     # Auto-adjust RStudio's minimum UID to allow low-UID users by default.
-    # If AUTH_MINIMUM_USER_ID is set, respect it; otherwise, if UID < 1000, set the floor to UID.
+    # If AUTH_MINIMUM_USER_ID is set, respect it; otherwise, if UID is numeric and <1000, use UID.
     FLOOR=""
     if [ -n "''${AUTH_MINIMUM_USER_ID:-}" ]; then
       FLOOR="''${AUTH_MINIMUM_USER_ID}"
     else
-      case "''${UIDV}" in
-        ''|*[!0-9]* ) FLOOR="" ;;
-        * )
-          if [ "''${UIDV}" -lt 1000 ]; then FLOOR="''${UIDV}"; fi
-          ;;
-      esac
+      if printf '%s' "''${UIDV}" | grep -Eq '^[0-9]+$'; then
+        if [ "''${UIDV}" -lt 1000 ]; then FLOOR="''${UIDV}"; fi
+      fi
     fi
     if [ -n "''${FLOOR}" ]; then
       if grep -q '^auth-minimum-user-id=' /etc/rstudio/rserver.conf 2>/dev/null; then
