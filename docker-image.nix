@@ -74,6 +74,7 @@ account  required       ${pkgs.pam}/lib/security/pam_unix.so
 session  required       ${pkgs.pam}/lib/security/pam_unix.so
 EOF
 
+    # rserver: listen on all interfaces; use our wrapper
     cat > $out/etc/rstudio/rserver.conf <<'EOF'
 www-address=0.0.0.0
 rsession-path=/bin/rsession-wrapper.sh
@@ -179,6 +180,28 @@ EOF
       fi
     fi
 
+    # Auto-adjust RStudio's minimum UID to allow low-UID users by default.
+    # If AUTH_MINIMUM_USER_ID is set, respect it; otherwise, if UID < 1000, set the floor to UID.
+    FLOOR=""
+    if [ -n "''${AUTH_MINIMUM_USER_ID:-}" ]; then
+      FLOOR="''${AUTH_MINIMUM_USER_ID}"
+    else
+      case "''${UIDV}" in
+        ''|*[!0-9]* ) FLOOR="" ;;
+        * )
+          if [ "''${UIDV}" -lt 1000 ]; then FLOOR="''${UIDV}"; fi
+          ;;
+      esac
+    fi
+    if [ -n "''${FLOOR}" ]; then
+      if grep -q '^auth-minimum-user-id=' /etc/rstudio/rserver.conf 2>/dev/null; then
+        sed -i "s/^auth-minimum-user-id=.*/auth-minimum-user-id=''${FLOOR}/" /etc/rstudio/rserver.conf
+      else
+        echo "auth-minimum-user-id=''${FLOOR}" >> /etc/rstudio/rserver.conf
+      fi
+    fi
+
+    # Optional ownership of mounts
     bool_true() { [ "''${1:-false}" = "true" ] || [ "''${1:-0}" = "1" ]; }
     if bool_true "''${CHOWN_PROJECTS:-false}"; then chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}/projects" || true; fi
     if bool_true "''${CHOWN_DATA:-false}";     then chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}/data" || true; fi
