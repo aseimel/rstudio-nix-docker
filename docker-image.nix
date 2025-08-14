@@ -6,8 +6,7 @@ let
 
   # Toolchain + dev libs for building common R packages
   toolchain = [
-    pkgs.stdenv.cc
-    pkgs.gfortran
+    pkgs.gfortran       # provides gfortran + gcc + g++
     pkgs.gnumake
     pkgs.binutils
     pkgs.pkg-config
@@ -94,12 +93,13 @@ local({
 })
 EOF
 
+    # Generic compiler names so PATH decides (provided by gfortran wrapper)
     cat > $out/etc/R/Makevars.site <<EOF
-CC=${pkgs.stdenv.cc.cc}/bin/cc
-CXX=${pkgs.stdenv.cc.cc}/bin/c++
-CXX11=${pkgs.stdenv.cc.cc}/bin/c++
-FC=${pkgs.gfortran}/bin/gfortran
-F77=${pkgs.gfortran}/bin/gfortran
+CC=cc
+CXX=c++
+CXX11=c++
+FC=gfortran
+F77=gfortran
 PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config
 EOF
   '';
