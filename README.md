@@ -13,4 +13,4 @@ docker run -d \
   -v $(pwd)/R-library:/home/armin/R/library \
   -v $(pwd)/data:/home/armin/data \
   -v $(pwd)/projects:/home/armin/projects \
-  ghcr.io/YOURUSERNAME/rstudio-nix:latest
+  ghcr.io/aseimel/rstudio-nix:latest
