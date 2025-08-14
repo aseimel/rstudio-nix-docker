@@ -34,7 +34,7 @@ let
   pcShare = lib.makeSearchPath "share/pkgconfig" devLibs;
   ldLib   = lib.makeLibraryPath devLibs;
 
-  # /etc: passwd/group/shadow, login.defs, PAM, rserver.conf, R configs
+  # /etc: passwd/group/shadow, login.defs, NSS, PAM, rserver.conf, R configs
   etcLayer = pkgs.runCommand "rstudio-etc" {} ''
     set -eu
     mkdir -p $out/etc/pam.d $out/etc/rstudio $out/etc/R
@@ -54,7 +54,7 @@ EOF
 root:*:10933:0:99999:7:::
 EOF
 
-    # Allow all IDs
+    # Allow Unraid-style IDs and set a sane default mail dir & hashing method
     cat > $out/etc/login.defs <<'EOF'
 MAIL_DIR        /var/spool/mail
 PASS_MAX_DAYS   99999
@@ -68,18 +68,30 @@ UMASK           022
 ENCRYPT_METHOD  SHA512
 EOF
 
+    # Minimal nsswitch so pam_unix lookups work in a minimal image
+    cat > $out/etc/nsswitch.conf <<'EOF'
+passwd: files
+group:  files
+shadow: files
+hosts:  files dns
+EOF
+
+    # PAM stack for RStudio (absolute Nix paths)
     cat > $out/etc/pam.d/rstudio <<EOF
+auth     required       ${pkgs.pam}/lib/security/pam_env.so
 auth     required       ${pkgs.pam}/lib/security/pam_unix.so
 account  required       ${pkgs.pam}/lib/security/pam_unix.so
+session  required       ${pkgs.pam}/lib/security/pam_limits.so
 session  required       ${pkgs.pam}/lib/security/pam_unix.so
 EOF
 
-    # rserver: listen on all interfaces; use our wrapper
+    # rserver: listen on all interfaces; use our wrapper (no debug keys)
     cat > $out/etc/rstudio/rserver.conf <<'EOF'
 www-address=0.0.0.0
 rsession-path=/bin/rsession-wrapper.sh
 EOF
 
+    # System-wide R config
     cat > $out/etc/R/Rprofile.site <<'EOF'
 local({
   rlib <- file.path(Sys.getenv("HOME"), "R", "library")
@@ -118,7 +130,7 @@ EOF
     exec ${pkgs.rstudio-server}/bin/rsession "$@"
   '';
 
-  # Entrypoint: flexible user + password handling + dirs + start rserver
+  # Entrypoint: flexible user + PAM-less password set + dirs + start rserver
   entrypoint = pkgs.writeShellScriptBin "entrypoint" ''
     set -euo pipefail
 
@@ -128,9 +140,10 @@ EOF
     UMASKV="''${UMASK:-}"
     PORT="''${WWW_PORT:-8787}"
 
-    mkdir -p /etc/R /etc/rstudio /var/lib/rstudio-server /var/run/rstudio-server
+    # Ensure base dirs and silence mailbox warnings
+    mkdir -p /etc/R /etc/rstudio /var/lib/rstudio-server /var/run/rstudio-server /var/spool/mail
 
-    # Group
+    # Group (avoid getent)
     if ! grep -qE "^([^:]*:){2}''${GIDV}:" /etc/group; then
       groupadd -g "''${GIDV}" "''${USERNAME}"
     fi
@@ -149,35 +162,35 @@ EOF
     HOME_DIR="/home/''${USERNAME}"
     mkdir -p "''${HOME_DIR}" "''${HOME_DIR}/projects" "''${HOME_DIR}/data" "''${HOME_DIR}/R/library"
     chown -R "''${UIDV}:''${GIDV}" "''${HOME_DIR}"
+    # create empty mailbox to avoid noisy warning
+    touch "/var/spool/mail/''${USERNAME}" || true
+    chown "''${UIDV}:''${GIDV}" "/var/spool/mail/''${USERNAME}" || true
 
+    # R env file
     REN="''${HOME_DIR}/.Renviron"
     touch "''${REN}"
     grep -q '^R_LIBS_USER=' "''${REN}" || printf 'R_LIBS_USER=%s\n' "''${HOME_DIR}/R/library" >> "''${REN}"
     chown "''${UIDV}:''${GIDV}" "''${REN}"
 
-    # Passwords
-    set_password_hash()  { echo "''${USERNAME}:''${1}" | chpasswd -e; }
-    set_password_plain() { echo "''${USERNAME}:''${1}" | chpasswd; }
+    # ----- Password handling WITHOUT PAM -----
+    # Precedence: PASSWORD_HASH -> PASSWORD_FILE -> PASSWORD (plaintext)
+    # Always write crypt hash to /etc/shadow via usermod -p
+    set_password_hash()  { usermod -p "''${1}" "''${USERNAME}"; }
 
     if [ -n "''${PASSWORD_HASH:-}" ]; then
       set_password_hash "''${PASSWORD_HASH}"
     elif [ -n "''${PASSWORD_FILE:-}" ] && [ -s "''${PASSWORD_FILE}" ]; then
       PW="$(cat "''${PASSWORD_FILE}")"
       case "''${PW}" in
-        \$*) set_password_hash "''${PW}" ;;
-        *)   set_password_plain "''${PW}" ;;
+        \$*) set_password_hash "''${PW}" ;;  # crypt hash
+        *)   set_password_hash "$(openssl passwd -6 "''${PW}")" ;;
       esac
     else
       PW="''${PASSWORD:-changeme}"
       if [ -z "''${PASSWORD:-}" ]; then
         echo "WARNING: PASSWORD not provided; defaulting to 'changeme' for user ''${USERNAME}" >&2
       fi
-      if command -v openssl >/dev/null 2>&1; then
-        HASH="$(openssl passwd -6 "''${PW}")"
-        set_password_hash "''${HASH}"
-      else
-        set_password_plain "''${PW}"
-      fi
+      set_password_hash "$(openssl passwd -6 "''${PW}")"
     fi
 
     # Auto-adjust RStudio's minimum UID to allow low-UID users by default.
