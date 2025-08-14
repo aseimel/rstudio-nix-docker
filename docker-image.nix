@@ -4,14 +4,14 @@
 let
   lib = pkgs.lib;
 
-  # Toolchain + dev libs for building common R packages
+  # Toolchain for R package builds (gfortran wrapper provides gcc & g++)
   toolchain = [
-    pkgs.gfortran       # provides gfortran + gcc + g++
+    pkgs.gfortran
     pkgs.gnumake
-    pkgs.binutils
     pkgs.pkg-config
   ];
 
+  # Dev libs commonly needed by CRAN packages
   devLibs = [
     pkgs.curl
     pkgs.openssl
@@ -30,11 +30,11 @@ let
     pkgs.gdk-pixbuf
   ];
 
-  pcLib = lib.makeSearchPath "lib/pkgconfig" devLibs;
+  pcLib   = lib.makeSearchPath "lib/pkgconfig" devLibs;
   pcShare = lib.makeSearchPath "share/pkgconfig" devLibs;
-  ldLib = lib.makeLibraryPath devLibs;
+  ldLib   = lib.makeLibraryPath devLibs;
 
-  # /etc files: passwd/group/shadow, PAM, rserver.conf, login.defs, R config
+  # /etc: passwd/group/shadow, login.defs, PAM, rserver.conf, R configs
   etcLayer = pkgs.runCommand "rstudio-etc" {} ''
     set -eu
     mkdir -p $out/etc/pam.d $out/etc/rstudio $out/etc/R
@@ -54,7 +54,7 @@ EOF
 root:*:10933:0:99999:7:::
 EOF
 
-    # Allow low IDs on Unraid
+    # Allow Unraid-style IDs
     cat > $out/etc/login.defs <<'EOF'
 MAIL_DIR        /var/spool/mail
 PASS_MAX_DAYS   99999
@@ -68,20 +68,17 @@ UMASK           022
 ENCRYPT_METHOD  SHA512
 EOF
 
-    # Minimal PAM config
     cat > $out/etc/pam.d/rstudio <<EOF
 auth     required       ${pkgs.pam}/lib/security/pam_unix.so
 account  required       ${pkgs.pam}/lib/security/pam_unix.so
 session  required       ${pkgs.pam}/lib/security/pam_unix.so
 EOF
 
-    # rserver: listen on all interfaces; use our wrapper
     cat > $out/etc/rstudio/rserver.conf <<'EOF'
 www-address=0.0.0.0
 rsession-path=/bin/rsession-wrapper.sh
 EOF
 
-    # System-wide R config
     cat > $out/etc/R/Rprofile.site <<'EOF'
 local({
   rlib <- file.path(Sys.getenv("HOME"), "R", "library")
@@ -93,7 +90,7 @@ local({
 })
 EOF
 
-    # Generic compiler names so PATH decides (provided by gfortran wrapper)
+    # Generic compilers; PATH (from wrapper) selects the right binaries
     cat > $out/etc/R/Makevars.site <<EOF
 CC=cc
 CXX=c++
@@ -104,16 +101,14 @@ PKG_CONFIG=${pkgs.pkg-config}/bin/pkg-config
 EOF
   '';
 
-  # rsession wrapper: escape Bash ${...} so Nix doesn't interpolate
+  # rsession wrapper (escape Bash vars so Nix doesn't interpolate)
   rsessionWrapper = pkgs.writeShellScriptBin "rsession-wrapper.sh" ''
     #!/bin/bash
     set -euo pipefail
 
-    # Ensure the user library and Makevars are respected
     export R_LIBS_USER="''${R_LIBS_USER:-$HOME/R/library}"
     export R_MAKEVARS_SITE="/etc/R/Makevars.site"
 
-    # Toolchain + pkg-config path for compilation
     export PATH="${lib.makeBinPath toolchain}:$PATH"
     export PKG_CONFIG_PATH="${pcLib}:${pcShare}"
     export LD_LIBRARY_PATH="${ldLib}:''${LD_LIBRARY_PATH:-}"
@@ -122,7 +117,7 @@ EOF
     exec ${pkgs.rstudio-server}/bin/rsession "$@"
   '';
 
-  # Entrypoint: flexible user + robust password handling + dirs + start rserver
+  # Entrypoint: flexible user + password handling + dirs + start rserver
   entrypoint = pkgs.writeShellScriptBin "entrypoint" ''
     set -euo pipefail
 
@@ -134,7 +129,7 @@ EOF
 
     mkdir -p /etc/R /etc/rstudio /var/lib/rstudio-server /var/run/rstudio-server
 
-    # Group via /etc/group (no getent dependency)
+    # Group
     if ! grep -qE "^([^:]*:){2}''${GIDV}:" /etc/group; then
       groupadd -g "''${GIDV}" "''${USERNAME}"
     fi
@@ -159,7 +154,7 @@ EOF
     grep -q '^R_LIBS_USER=' "''${REN}" || printf 'R_LIBS_USER=%s\n' "''${HOME_DIR}/R/library" >> "''${REN}"
     chown "''${UIDV}:''${GIDV}" "''${REN}"
 
-    # Password handling
+    # Passwords
     set_password_hash()  { echo "''${USERNAME}:''${1}" | chpasswd -e; }
     set_password_plain() { echo "''${USERNAME}:''${1}" | chpasswd; }
 
@@ -217,10 +212,7 @@ pkgs.dockerTools.buildImage {
   name = "rstudio-nix";
   tag  = "latest";
 
-  copyToRoot = [
-    rootfs
-    etcLayer
-  ];
+  copyToRoot = [ rootfs etcLayer ];
 
   config = {
     Cmd = [ "/bin/entrypoint" ];
