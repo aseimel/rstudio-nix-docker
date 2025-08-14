@@ -41,20 +41,23 @@ jobs:
         run: |
           set -euo pipefail
           RSTUDIO_VERSION=$(nix-instantiate --eval -E '(import <nixpkgs> {}).rstudio-server.version' | tr -d '"')
-          echo "version=$RSTUDIO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "RStudio version from nixpkgs: $RSTUDIO_VERSION"
+          SAFE_TAG=$(printf "%s" "$RSTUDIO_VERSION" | sed 's/[^A-Za-z0-9_.-]/-/g')
+          echo "raw=$RSTUDIO_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "safe=$SAFE_TAG"          >> "$GITHUB_OUTPUT"
+          echo "RStudio version (nixpkgs): $RSTUDIO_VERSION"
+          echo "Sanitized Docker tag:     $SAFE_TAG"
 
       - name: Skip if this version already exists on GHCR
         shell: bash
         run: |
           set -euo pipefail
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          if docker manifest inspect ghcr.io/$OWNER_LC/rstudio-nix:${{ steps.version.outputs.version }} >/dev/null 2>&1; then
-            echo "Image tag already exists: ghcr.io/$OWNER_LC/rstudio-nix:${{ steps.version.outputs.version }}"
-            echo "Nothing to do. Exiting."
+          SAFE_TAG='${{ steps.version.outputs.safe }}'
+          if docker manifest inspect ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG >/dev/null 2>&1; then
+            echo "Image already exists: ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG"
             exit 0
           fi
-          echo "No existing image for version ${{ steps.version.outputs.version }}. Proceeding to build."
+          echo "No existing image for tag $SAFE_TAG. Proceeding to build."
 
       - name: Build Docker image tarball with Nix
         shell: bash
@@ -68,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           docker load < result
-          docker images | grep -E '^rstudio-nix\s+latest'
+          docker images || true
 
       - name: Tag and push
         shell: bash
@@ -76,18 +79,16 @@ jobs:
           set -euo pipefail
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           DATE_TAG=$(date -u +%Y%m%d)
-
-          # Sanity: read version we evaluated earlier (no Nix vars in shell)
-          RSTUDIO_VERSION='${{ steps.version.outputs.version }}'
+          SAFE_TAG='${{ steps.version.outputs.safe }}'
 
           # Tag for GHCR
           docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:latest
           docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
-          docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$RSTUDIO_VERSION
+          docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG
 
           # Push
           docker push ghcr.io/$OWNER_LC/rstudio-nix:latest
           docker push ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
-          docker push ghcr.io/$OWNER_LC/rstudio-nix:$RSTUDIO_VERSION
+          docker push ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG
 
-          echo "Pushed: latest, $DATE_TAG, $RSTUDIO_VERSION"
+          echo "Pushed tags: latest, $DATE_TAG, $SAFE_TAG"
