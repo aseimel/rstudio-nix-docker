@@ -81,12 +81,10 @@ jobs:
           DATE_TAG=$(date -u +%Y%m%d)
           SAFE_TAG='${{ steps.version.outputs.safe }}'
 
-          # Tag for GHCR
           docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:latest
           docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
           docker tag rstudio-nix:latest ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG
 
-          # Push
           docker push ghcr.io/$OWNER_LC/rstudio-nix:latest
           docker push ghcr.io/$OWNER_LC/rstudio-nix:$DATE_TAG
           docker push ghcr.io/$OWNER_LC/rstudio-nix:$SAFE_TAG
