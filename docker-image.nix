@@ -85,6 +85,11 @@ session  required       ${pkgs.pam}/lib/security/pam_limits.so
 session  required       ${pkgs.pam}/lib/security/pam_unix.so
 EOF
 
+    # PAM stack for chpasswd/passwd so plaintext -> shadow via system policy
+    cat > $out/etc/pam.d/passwd <<EOF
+password required       ${pkgs.pam}/lib/security/pam_unix.so
+EOF
+
     # rserver: listen on all interfaces; use our wrapper (no debug keys)
     cat > $out/etc/rstudio/rserver.conf <<'EOF'
 www-address=0.0.0.0
@@ -130,7 +135,7 @@ EOF
     exec ${pkgs.rstudio-server}/bin/rsession "$@"
   '';
 
-  # Entrypoint: flexible user + PAM-less password set + dirs + start rserver
+  # Entrypoint: flexible user + PLAINTEXT chpasswd + dirs + start rserver
   entrypoint = pkgs.writeShellScriptBin "entrypoint" ''
     set -euo pipefail
 
@@ -172,29 +177,22 @@ EOF
     grep -q '^R_LIBS_USER=' "''${REN}" || printf 'R_LIBS_USER=%s\n' "''${HOME_DIR}/R/library" >> "''${REN}"
     chown "''${UIDV}:''${GIDV}" "''${REN}"
 
-    # ----- Password handling WITHOUT PAM -----
-    # Precedence: PASSWORD_HASH -> PASSWORD_FILE -> PASSWORD (plaintext)
-    # Always write crypt hash to /etc/shadow via usermod -p
-    set_password_hash()  { usermod -p "''${1}" "''${USERNAME}"; }
-
-    if [ -n "''${PASSWORD_HASH:-}" ]; then
-      set_password_hash "''${PASSWORD_HASH}"
-    elif [ -n "''${PASSWORD_FILE:-}" ] && [ -s "''${PASSWORD_FILE}" ]; then
+    # ----- Password handling via PLAINTEXT -> chpasswd (system hashes) -----
+    # NOTE: PASSWORD_HASH is intentionally ignored in this build per request.
+    PW=""
+    if [ -n "''${PASSWORD_FILE:-}" ] && [ -s "''${PASSWORD_FILE}" ]; then
       PW="$(cat "''${PASSWORD_FILE}")"
-      case "''${PW}" in
-        \$*) set_password_hash "''${PW}" ;;  # crypt hash
-        *)   set_password_hash "$(openssl passwd -6 "''${PW}")" ;;
-      esac
     else
       PW="''${PASSWORD:-changeme}"
       if [ -z "''${PASSWORD:-}" ]; then
         echo "WARNING: PASSWORD not provided; defaulting to 'changeme' for user ''${USERNAME}" >&2
       fi
-      set_password_hash "$(openssl passwd -6 "''${PW}")"
     fi
+    # Feed plaintext to chpasswd (uses PAM 'passwd' service and login.defs policy)
+    echo "''${USERNAME}:''${PW}" | chpasswd
 
     # Auto-adjust RStudio's minimum UID to allow low-UID users by default.
-    # If AUTH_MINIMUM_USER_ID is set, respect it; otherwise, if UID is numeric and <1000, use UID.
+    # If AUTH_MINIMUM_USER_ID is set, respect it; else if UID is numeric and <1000, use UID.
     FLOOR=""
     if [ -n "''${AUTH_MINIMUM_USER_ID:-}" ]; then
       FLOOR="''${AUTH_MINIMUM_USER_ID}"
